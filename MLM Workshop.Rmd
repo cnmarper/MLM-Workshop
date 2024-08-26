@@ -1,0 +1,351 @@
+---
+title: "MLM Workshop"
+author: "Carla Martinez-Perez"
+date: "2024-08-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup, include=FALSE}
+library("reshape2") #transform data from wide to long
+library("tidyr") #for tidying messy data
+library("dplyr") #for data manipulation
+library("tidyverse")  #for data management
+library("corrplot")    #for correlation plots
+library("lme4") #for multilevel models
+library("nlme")
+library("DHARMa")
+library("optimx") #for model convergence 
+library("Hmisc") #for variable clustering
+library("emmeans") #for estimated marginal means (Helps interpreting LME models)
+library("effects")
+library("readxl") #for reading Excel files
+library("gdata") #for interleave
+library("ggplot2") #for data graphing/charting
+library("MuMIn") #for model inference (AIC and BIC comparisons)
+library("lmerTest") # Satterthwaite's approximation (p values for LME)
+library("performance")
+
+```
+#######
+Introduction 
+
+**ID**            = participant ID
+
+**Group**         = as stated - 2 experimental groups, 1 control group
+
+**Phase**         = Reinforcement contingency in standard resurgence protocol
+
+**Bin**   = nth minute of exposure to overall protocol - numbered such that last min of Phases 1 and 2 and first min of Phase 3 are 0 - this is to facilitate comparisons at those timepoints with emmeans          
+
+**Rate**          = response rate 
+
+**Bin.Normal**   = nth minute of exposure to overall protocol, numbered in ordinarily (e.g., 1-15)
+``` {r transform file, include = TRUE}
+#set wd
+setwd()
+
+#read .csv and convert long form
+Data <- read.csv("/Users/cnmartinezperez/MLM Workshop/Data_wide.csv", header=TRUE)
+View(Data)
+data_long <- gather(Data, ID, Rate, P001:P151, factor_key=FALSE)
+write.csv(data_long,"/Users/cnmartinezperez/MLM Workshop/Data_long.csv")
+```
+
+########
+Methods
+
+Participants = ~50 adults recruited via Prolific
+
+Time         = 13.5 mins total (4.5-min phases)
+
+Phases       = 3
+- VI 2 Target: first 4.5 min 
+- VI 2 Alt:    second 4.5 min
+- EXT:        last 4.5 min 
+
+### Analytical Strategy-MODEL 1
+
+Within-subject factors:
+-Bin: nth minute of protocol 
+-Phase: reinforcement contingency in place
+
+Between-subject factor(s):
+  -Group
+  
+  -Rate(s)
+
+```{r import Target longform, include = TRUE}
+#import target data - all Phases
+##for this to work you need to go back to the csv files and add info (i.e., Group, Phase, Bin, Bin.Normal) to the columns
+Data <-read.csv("/Users/cnmartinezperez/MLM Workshop/Data_long.csv")
+Data$ID <- as.factor(Data$ID)
+Data$Group <- as.factor(Data$Group)
+Data$Phase <- as.factor(Data$Phase)
+View(Data)
+```
+
+```{r Data Inspection}
+
+#individual data, colored by group
+Data %>% 
+  ggplot(aes(x = Bin.Normal, 
+             y = Rate,
+             color=Group))+
+  geom_line(aes(group = ID),
+            linewidth   = 0.3)+
+  geom_vline(xintercept = 9.25)+geom_vline(xintercept = 18.25)+
+  theme_bw()
+
+#group means + standard error
+Data %>%
+  group_by(Group, Phase, Bin.Normal) %>%
+  dplyr::summarize(rawMeans = mean(Rate),
+                   se   = sd(Rate)/sqrt(n())) %>%
+  ggplot(aes(x = Bin.Normal, y = rawMeans, color=Group)) +
+  geom_line() +
+  geom_errorbar(aes(ymin = rawMeans - se, ymax = rawMeans + se))+
+  geom_vline(xintercept = 9.25)+geom_vline(xintercept = 18.25)+
+  theme_bw()
+
+#-------
+
+```
+
+```{r Null Model}
+#Run a null model.. or baseline model... or a random-intercept only model
+Data_Empty <- lmer(Rate ~ 1 + (1 | ID), 
+                           REML = FALSE,
+                     data = Data)
+###Our DV is Rate, and we have fixed and random effect of the intercept (represented by the 1s). Our grouping variable is ID
+
+#get a summary 
+summary(Data_Empty)
+###the fixed effect for the intercept is 14.4731, representing the average response rate across all participants. 
+
+#For Intraclass Correlation Coefficient
+
+icc(Data_Empty)
+ #About 8% of variance is due to clusters!
+#This is a little low but let's go ahead with modeling
+
+
+```
+Warrants a  linear mixed model: potentially...
+
+Presumed maximal model:
+  
+1. Rate ~ Bin * Phase * Group + (Bin * Phase | ID) 
+
+^^ this is based on previous research (i.e., theory). We know based on previous research that we would want to evaluate the predicting effects of Bin, Phase, and Group on the DV. What we vary, in this case, is the random effects. 
+
+```{r RE Structure}
+#if model cannot converge, change nlminb to L-BFGS-B
+model1 = lmer(Rate ~ Bin * Phase * Group + (1 | ID),
+              data = Data,
+              REML = TRUE,
+              control = lmerControl(optimizer = "optimx",
+                                    calc.derivs = FALSE,
+                                    optCtrl = list(method = "nlminb",
+                                                   starttests = FALSE,
+                                                   kkt = FALSE)))
+
+model2 = lmer(Rate ~ Bin * Phase * Group + (Bin | ID),
+              data = Data,
+              REML = TRUE,
+              control = lmerControl(optimizer = "optimx",
+                                    calc.derivs = FALSE,
+                                    optCtrl = list(method = "nlminb",
+                                                   starttests = FALSE,
+                                                   kkt = FALSE)))
+model3 = lmer(Rate ~ Bin * Phase * Group + (Phase + Bin | ID),
+              data = Data,
+              REML = TRUE,
+              control = lmerControl(optimizer = "optimx",
+                                    calc.derivs = FALSE,
+                                    optCtrl = list(method = "L-BFGS-B",
+                                                   starttests = FALSE,
+                                                   kkt = FALSE)))
+#Compare models based on lowest AIC (best model)
+AICc(model1,model2,model3)
+
+bestmodel <- model3
+
+```
+
+```{r Fixed Effects Significant}
+#We evaluate the significance of our fixed effects using Wald tests with the best-fitting mode
+car::Anova(bestmodel)
+
+```
+There are several assumptions for linear mixed effects models: 
+ 
+1.The explanatory variables are related linearly to the response.
+2.The errors in model predictions (i.e., model residuals) have constant variance. 
+3.The errors are independent. 
+4.The errors are normally distributed. 
+```{r Assumptions_Residuals and Linearity}
+library("moments")
+library(boot)
+library(DHARMa) # Both have model diagnostic tools for LME
+library(ggplot2) # Charting
+library(ggpubr)
+library(knitr)
+library(nlme)
+library(vcdExtra)
+library(aods3)
+library(stringr)
+
+#Checking residuals
+res <- simulateResiduals(bestmodel, refit = F, n = 1000)
+
+linearityDataFrame <- data.frame(Data$Rate, 
+                                 res$fittedPredictedResponse)
+#normality plots
+
+##QQplot##
+n <- length(res$scaledResiduals)
+m <- (1:n)/(n + 1)
+qqdataframe <- data.frame(m, res$scaledResiduals)
+sx <- sort(qqdataframe$m)
+sy <- sort(qqdataframe$res.scaledResiduals)
+lenx <- length(sx)
+leny <- length(sy)
+if (leny < lenx) 
+  sx <- approx(1L:lenx, sx, n = leny)$y
+if (leny > lenx) 
+  sy <- approx(1L:leny, sy, n = lenx)$y
+Plot1 <- ggplot(qqdataframe, aes(x = sx, y = sy)) +
+  geom_point(size = 4, shape = 1, stroke = 1.5) +
+  xlab("Expected") +
+  ylab("Observed") +
+  xlim(0,1) +
+  ylim(0,1) +
+  geom_abline(intercept = 0, linewidth = 1.5, linetype = "dashed") +
+  ggtitle("Q-Q Plot Residuals") + 
+  theme_bw(base_size = 18) +
+  theme(axis.text = element_text(color = "black"), 
+        panel.grid = element_blank(), 
+        panel.border = element_blank(), 
+        axis.line = element_line(linewidth = 1), 
+        axis.ticks = element_line(linewidth = 1), 
+        plot.title = element_text(hjust = 0.5))
+
+##Histogram of Residuals##
+histdf <- data.frame(res$fittedResiduals)
+Plot2 <- ggplot(histdf, aes(x = res$fittedResiduals)) + 
+  geom_histogram(color = "black", fill = "lightgray", bins = 12) +
+  #scale_x_continuous(limits = c(-2, 2), breaks = c(-2, -1, 0, 1, 2)) +
+  #scale_x_continuous(limits = c(-2, 2)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_bw(base_size = 18) +
+  ggtitle("Histogram of Residuals") +
+  xlab("Residuals") +
+  ylab("Count") +
+  theme(axis.text = element_text(color = "black"), 
+        panel.grid = element_blank(), 
+        panel.border = element_blank(), 
+        axis.line = element_line(linewidth = 1),
+        axis.ticks = element_line(linewidth = 1), 
+        plot.title = element_text(hjust = 0.5))
+
+ggarrange(Plot1, Plot2,
+          ncol = 2,
+          nrow = 1)
+
+```
+
+```{r Model Predictions}
+#Checking residuals
+Data$pred = predict(bestmodel)
+Data$resid = resid(bestmodel)
+
+Data %>%
+  group_by(Group, Phase, Bin.Normal) %>%
+  dplyr::summarize(predMean = mean(pred),
+                   se   = sd(pred)/sqrt(n())) %>%
+  ggplot(aes(x = Bin.Normal, y = predMean, color=Group)) +
+  geom_line() +
+  geom_errorbar(aes(ymin = predMean - se, ymax = predMean + se))+
+  geom_vline(xintercept = 9.25)+geom_vline(xintercept = 18.25)+
+  theme_bw()
+```
+Explore model predictions by visualizing it while superimposed with the individual data.
+```{r Probabilities, echo=FALSE, eval=TRUE}
+
+Data$predg <- predict(bestmodel, type = "response", re.form = NA)
+
+# The individual-level fits, as normal, are retained below
+Data$predi <- predict(bestmodel, type = "response")
+
+# Exploded out view
+ggplot(Data, aes(
+  x = Bin.Normal,
+  y = predi,
+  color = Group,
+  group = ID
+)) +
+  ggtitle("Cross-Group Fixed Effects and Individual Variance") +
+  geom_line(
+    mapping = aes(
+      x = Bin.Normal,
+      y = predg,
+      group = Group
+    ),
+  linewidth = 1.5,
+    color = "black"
+  ) +
+  xlab("Bin") +
+  ylab("Responses") +
+  geom_line(alpha = 0.25) +
+  geom_vline(xintercept = 9.5) +
+  geom_vline(xintercept = 18.5) +
+  theme_bw() +
+  facet_wrap(~Group, nrow = 4) +
+  theme(legend.position = "bottom")
+
+# Exploded out view
+ggplot(Data, aes(
+  x = Bin.Normal,
+  y = predi,
+  color = Group,
+  group = ID
+)) +
+  ggtitle("Collapsed Fixed Effects and Individual Variance") +
+  geom_line(
+    mapping = aes(
+      x = Bin.Normal,
+      y = predg,
+      color = Group,
+      group = Group
+    ),
+    linewidth = 2
+  ) +
+  xlab("Bin") +
+  ylab("Responses") +
+  geom_line(alpha = 0.125) +
+  geom_vline(xintercept = 9.5) +
+  geom_vline(xintercept = 18.5) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+```{r Model Results and Interpretations}
+summary(bestmodel)
+
+#Calculate effect sizes (d) of significant fixed effects using Westfall et al. (2014)'s method. Essentially, we are calculating the square root of the sum of the variance of the random effects and then divided the fixed effect estimate by that value. 
+
+#sqrt(intercept + RE1 + RE2)
+#XX.XX
+#print(ES <- FE/XX.XX)
+```
+
+```{r Post Hoc Comparisons}
+#...looking @ last bin in Phases 1 and 2, first bin of Phase 3-- all coded '0'
+#between-phases for each group 
+emmeans::emmeans(bestmodel, pairwise~Phase|Bin|Group, adjust="none", at = list(Bin = c(0)),pbkrtest.limit = 5025)
+
+emmeans::emmeans(bestmodel, pairwise~Group|Bin|Phase, adjust="none", at = list(Bin = c(0)),pbkrtest.limit = 5025)
+```
