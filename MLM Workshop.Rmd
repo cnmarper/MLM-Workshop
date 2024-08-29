@@ -8,7 +8,7 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
-
+Load data and dependencies
 ```{r setup, include=FALSE}
 library("reshape2") #transform data from wide to long
 library("tidyr") #for tidying messy data
@@ -16,7 +16,7 @@ library("dplyr") #for data manipulation
 library("tidyverse")  #for data management
 library("corrplot")    #for correlation plots
 library("lme4") #for multilevel models
-library("nlme")
+library("nlme") 
 library("DHARMa")
 library("optimx") #for model convergence 
 library("Hmisc") #for variable clustering
@@ -69,13 +69,16 @@ Phases       = 3
 
 ### Analytical Strategy-MODEL 1
 
-Within-subject factors:
+Within-subject factors: (random-intercept)
 -Bin: nth minute of protocol 
 -Phase: reinforcement contingency in place
 
-Between-subject factor(s):
+Between-subject factor(s): (fixed effect)
   -Group
+  -Phase
+  _Bin
   
+ Outcome:
   -Rate(s)
 
 ```{r import Target longform, include = TRUE}
@@ -114,23 +117,27 @@ Data %>%
 #-------
 
 ```
+Now we run a null model to check for clustering. 
 
 ```{r Null Model}
-#Run a null model.. or baseline model... or a random-intercept only model
+
 Data_Empty <- lmer(Rate ~ 1 + (1 | ID), 
                            REML = FALSE,
                      data = Data)
-###Our DV is Rate, and we have fixed and random effect of the intercept (represented by the 1s). Our grouping variable is ID
 
-#get a summary 
+#In this example, our null model contains the dependent variable "Rate" and we have fixed and random effect of the intercept (represented by the 1s). Our grouping variable is ID. The first 1 represents that we are evaluating the model at the overall mean of Rate. The (1|ID) means we want a random intercept at each level of ID (i.e., we want a random intercept for each participant)
+
 summary(Data_Empty)
-###the fixed effect for the intercept is 14.4731, representing the average response rate across all participants. 
+##Few things to consider here
+#1. The log-likelihood measures how well the model fits the data; higher values (closer to zero) indicate a better fit.
+#2. The estimate value of 14.47 indicates the overall mean of Rate across all IDs
+#3. This is the p-value associated with the t-test for the fixed effect. It tests the null hypothesis that the intercept is zero. A very small p-value (much less than 0.05) indicates that the intercept is significantly different from zero.
 
-#For Intraclass Correlation Coefficient
+#####Intraclass Correlation Coefficient
 
 icc(Data_Empty)
- #About 8% of variance is due to clusters!
-#This is a little low but let's go ahead with modeling
+ #About 8% of variance is due to differences between groups, while about 92% of variance is due to differences within groups.
+#In mixed-effects models, an ICC of 8% still indicates that there is some clustering effect or group-level variance that should be accounted for in the model. Even a small ICC can justify using a mixed-effects model over a simple regression model if the group-level effect is significant.
 
 
 ```
@@ -141,6 +148,9 @@ Presumed maximal model:
 1. Rate ~ Bin * Phase * Group + (Bin * Phase | ID) 
 
 ^^ this is based on previous research (i.e., theory). We know based on previous research that we would want to evaluate the predicting effects of Bin, Phase, and Group on the DV. What we vary, in this case, is the random effects. 
+
+In lme4, the syntax for a two-level model is lmer(DV ~ 1 + IV1 + IV2 + ... + IVp + (random_effect1 + random_effect2 + ... + random_effect3 | grouping_variable), data = dataset).
+Notice that the parameters are now conditional on Bin. The intercept is no longer interpreted as the intercept across all participants; it’s the intercept across all participants conditional on Bin being equal to 0.
 
 ```{r RE Structure}
 #if model cannot converge, change nlminb to L-BFGS-B
@@ -175,9 +185,9 @@ AICc(model1,model2,model3)
 bestmodel <- model3
 
 ```
-
+If you get a "boundary (singular) fit: see help('isSingular')" warning, it means your model is singular. Singularity occurs when an element of your variance-covariance matrix is estimated as essentially zero as a result of extreme multicollinearity or because the parameter is actually essentially zero.
 ```{r Fixed Effects Significant}
-#We evaluate the significance of our fixed effects using Wald tests with the best-fitting mode
+#We evaluate the significance of our fixed effects using Wald tests with the best-fitting model. The test evaluates whether the fixed-effect parameters are significantly different from zero (or some other specified value). Moreover, the Wald test statistic follows a chi-squared distribution with degrees of freedom equal to the number of parameters being tested
 car::Anova(bestmodel)
 
 ```
@@ -204,7 +214,10 @@ res <- simulateResiduals(bestmodel, refit = F, n = 1000)
 
 linearityDataFrame <- data.frame(Data$Rate, 
                                  res$fittedPredictedResponse)
-#normality plots
+
+
+#Normality plots
+##Note: A clear pattern (e.g., curvature) suggests a violation of the linearity assumption.
 
 ##QQplot##
 n <- length(res$scaledResiduals)
@@ -256,8 +269,12 @@ ggarrange(Plot1, Plot2,
           ncol = 2,
           nrow = 1)
 
-```
+#Normality tests (Shapiro-Wilk Test)
+#Specifically designed to detect deviations from normality
+shapiro.test(linearityDataFrame$res.fittedPredictedResponse)
 
+```
+We now begin to explore how the model predicts response rate by plotting
 ```{r Model Predictions}
 #Checking residuals
 Data$pred = predict(bestmodel)
@@ -273,9 +290,10 @@ Data %>%
   geom_vline(xintercept = 9.25)+geom_vline(xintercept = 18.25)+
   theme_bw()
 ```
-Explore model predictions by visualizing it while superimposed with the individual data.
-```{r Probabilities, echo=FALSE, eval=TRUE}
 
+Further explore the model while superimposed with the group and individual data.
+```{r Probabilities, echo=FALSE, eval=TRUE}
+#the group-level fits
 Data$predg <- predict(bestmodel, type = "response", re.form = NA)
 
 # The individual-level fits, as normal, are retained below
@@ -332,10 +350,12 @@ ggplot(Data, aes(
   theme_bw() +
   theme(legend.position = "bottom")
 ```
+Lastly, call a summary of the model. This will guide your interpretation of the data. 
 ```{r Model Results and Interpretations}
 summary(bestmodel)
 
-#Calculate effect sizes (d) of significant fixed effects using Westfall et al. (2014)'s method. Essentially, we are calculating the square root of the sum of the variance of the random effects and then divided the fixed effect estimate by that value. 
+#To Calculate effect sizes (d) of significant fixed effects using Westfall et al. (2014)'s method. 
+#Essentially, we are calculating the square root of the sum of the variance of the random effects and then divided the fixed effect estimate by that value. 
 
 #sqrt(intercept + RE1 + RE2)
 #XX.XX
@@ -349,3 +369,4 @@ emmeans::emmeans(bestmodel, pairwise~Phase|Bin|Group, adjust="none", at = list(B
 
 emmeans::emmeans(bestmodel, pairwise~Group|Bin|Phase, adjust="none", at = list(Bin = c(0)),pbkrtest.limit = 5025)
 ```
+
